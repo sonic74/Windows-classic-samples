@@ -12,6 +12,15 @@
 #include <Shlwapi.h>
 #include <powrprof.h>
 
+#include <xinput.h>
+
+#include <winsock.h>
+#include <io.h>
+
+#include <stdint.h>
+
+#define PORT 1234
+
 // Include the v6 common controls in the manifest
 #pragma comment(linker, \
     "\"/manifestdependency:type='Win32' "\
@@ -27,11 +36,170 @@ HPOWERNOTIFY    g_hPowerNotifyMonitor = NULL;
 SYSTEM_POWER_CAPABILITIES   g_pwrCaps;
 bool            g_fSleepState = false;
 
+bool keepRunning = true;
+
+//#include <input.h>
+struct input_event {
+    struct timeval time;
+    uint16_t type;
+    uint16_t code;
+    int32_t value;
+};
+
+struct input_event_ex {
+    uint16_t joyno; // todo alignment? seems to get padded.
+    input_event ev;
+};
+#define EVENTS_MAX_COUNT (2+2+10)*XUSER_MAX_COUNT
+
+//#include <uapi/linux/input.h>
+#define EV_KEY			0x01
+
+#define BTN_SOUTH		0x130
+#define BTN_A			BTN_SOUTH
+#define BTN_EAST		0x131
+#define BTN_B			BTN_EAST
+#define BTN_NORTH		0x133
+#define BTN_X			BTN_NORTH // ?
+#define BTN_WEST		0x134
+#define BTN_Y			BTN_WEST // ?
+#define BTN_TL			0x136
+#define BTN_TR			0x137
+#define BTN_SELECT		0x13a
+#define BTN_START		0x13b
+#define BTN_THUMBL		0x13d
+#define BTN_THUMBR		0x13e
+
+#define BTN_DPAD_UP		0x220
+#define BTN_DPAD_DOWN		0x221
+#define BTN_DPAD_LEFT		0x222
+#define BTN_DPAD_RIGHT		0x223
+
 INT_PTR CALLBACK ChooseDeviceDlgProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
+uint32_t numberOfSetBits(uint32_t i)
+{
+    i = i - ((i >> 1) & 0x55555555);
+    i = (i & 0x33333333) + ((i >> 2) & 0x33333333);
+    return (((i + (i >> 4)) & 0x0F0F0F0F) * 0x01010101) >> 24;
+}
+
+void fillEv(input_event_ex* ev, uint16_t joyno, uint16_t code, int32_t value) {
+    ev->joyno = joyno;
+//    SYSTEMTIME st;
+//    GetSystemTime(&st);
+    // todo unix epoch
+    ev->ev.time.tv_sec = 0;//st.wSecond;
+    ev->ev.time.tv_usec = 0;//st.wMilliseconds;
+    ev->ev.type = EV_KEY;
+    ev->ev.code = code;
+    ev->ev.value = value;
+    DbgPrint(L"fillEv(,%i, %x, %x)\n", joyno, ev->ev.code, ev->ev.value);
+}
 
 INT WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE /*hPrevInstance*/, _In_ LPWSTR /*lpCmdLine*/, _In_ INT nCmdShow)
 {
+    struct sockaddr_in server;
+    struct hostent* host_info;
+    //unsigned long addr;
+
+    SOCKET sock;
+
+    char buffer[80];
+
+    /* Initialisiere TCP für Windows ("winsock"). */
+    WORD wVersionRequested;
+    WSADATA wsaData;
+    wVersionRequested = MAKEWORD(1, 1);
+    if (WSAStartup(wVersionRequested, &wsaData) != 0)
+    {
+        ShowError(NULL, L"WSAStartup() failed!", 0);
+        goto done;
+    }
+    else {
+        DbgPrint(L"Winsock initialisiert\n");
+    }
+
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        ShowError(NULL, L"socket() failed!", 0);
+        goto done;
+    }
+
+    
+    int iResult = 0;
+
+    BOOL bOptVal = TRUE;
+    int bOptLen = sizeof(BOOL);
+
+    int iOptVal = 0;
+    int iOptLen = sizeof(int);
+    iResult = getsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&iOptVal, &iOptLen);
+    if (iResult == SOCKET_ERROR) {
+        ShowError(NULL, L"getsockopt for TCP_NODELAY failed with error.", WSAGetLastError());
+        goto done;
+    }
+    else
+        DbgPrint(L"TCP_NODELAY Value: %ld\n", iOptVal);
+    iResult = setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&bOptVal, bOptLen);
+    if (iResult == SOCKET_ERROR) {
+        ShowError(NULL, L"setsockopt for TCP_NODELAY failed with error.", WSAGetLastError());
+        goto done;
+    }
+    else
+        DbgPrint(L"Set TCP_NODELAY: ON\n");
+
+    iResult = getsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&iOptVal, &iOptLen);
+    if (iResult == SOCKET_ERROR) {
+        ShowError(NULL, L"getsockopt for TCP_NODELAY failed with error.", WSAGetLastError());
+        goto done;
+    }
+    else
+        DbgPrint(L"TCP_NODELAY Value: %ld\n", iOptVal);
+
+
+    char hostname[80];
+    if (__argc > 1)
+    {
+        /*DbgPrint(__wargv[1]);
+        strcpy(hostname, __argv[1]);*/
+        sprintf(hostname, "%ws", __argv[1]);
+    }
+    else {
+        strcpy(hostname, "MiSTer.");
+    }
+    sprintf(buffer, "hostname=%s\n", hostname); OutputDebugStringA(buffer); // DbgPrint() doesn't work for C strings
+    host_info = gethostbyname(hostname);
+    if (NULL == host_info) {
+        ShowError(NULL, L"gethostbyname() failed!", 0);
+        goto done;
+    }
+    /* Server-IP-Adresse */
+    memcpy((char*)&server.sin_addr, host_info->h_addr, host_info->h_length);
+    /* IPv4-Verbindung */
+    server.sin_family = AF_INET;
+    /* Portnummer */
+    server.sin_port = htons(PORT);
+
+    /* Baue die Verbindung zum Server auf. */
+    if (connect(sock, (struct sockaddr*) & server, sizeof(server)) < 0) {
+        int i = 0;
+        struct in_addr addr;
+        while (host_info->h_addr_list[i] != 0) {
+            addr.s_addr = *(u_long*)host_info->h_addr_list[i++];
+            sprintf(buffer, "\tIPv4 Address #%d: %s\n", i, inet_ntoa(addr)); OutputDebugStringA(buffer);
+        }
+        sprintf(buffer, "Kann keine Verbindung zu %s:%i (%i) herstellen\n", hostname, PORT, host_info->h_addrtype); OutputDebugStringA(buffer);
+        ShowError(NULL, L"connect() failed!", 0);
+        goto done;
+    }
+    // todo: TCP_NO_DELAY
+    
+    
+    
+    
+    
+    
     bool bCoInit = false, bMFStartup = false;
 
     // Initialize the common controls
@@ -66,10 +234,112 @@ INT WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE /*hPrevInstance
     // Run the message loop.
 
     MSG msg;
-    while (GetMessage(&msg, NULL, 0, 0))
+//    while (GetMessage(&msg, NULL, 0, 0))
+    WORD Old[XUSER_MAX_COUNT];
+    for (uint16_t i = 0; i < XUSER_MAX_COUNT; i++) {
+        Old[i] = 0;
+    }
+    while (keepRunning)
     {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
+        if (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+
+
+
+
+
+        DWORD dwResult;
+        input_event_ex ev[EVENTS_MAX_COUNT];
+        ZeroMemory(&ev, sizeof(ev));
+        uint16_t noEvs = 0;
+        for (uint16_t i = 0; i < XUSER_MAX_COUNT; i++)
+        {
+            XINPUT_STATE state;
+            ZeroMemory(&state, sizeof(XINPUT_STATE));
+
+            // Simply get the state of the controller from XInput.
+            dwResult = XInputGetState(i, &state);
+
+            if (dwResult == ERROR_SUCCESS)
+            {
+                // Controller is connected 
+                if (Old[i] != state.Gamepad.wButtons) {
+                    WORD changes = state.Gamepad.wButtons ^ Old[i];
+                    uint32_t bits = numberOfSetBits(changes);
+                    if (bits>1) {
+                        //ShowError(NULL, L"bits>1", bits);
+                        DbgPrint(L"%i > 1\n", bits);
+                    }
+                    Old[i] = state.Gamepad.wButtons;
+                    DbgPrint(L"i=%i  wButtons=%x  changes=%x\n", i, state.Gamepad.wButtons, changes);
+                    if (changes & XINPUT_GAMEPAD_DPAD_UP) {
+                        fillEv(&ev[noEvs++], i, BTN_DPAD_UP, state.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_UP ? 1 : 0);
+                    }
+                    if (changes & XINPUT_GAMEPAD_DPAD_DOWN) {
+                        fillEv(&ev[noEvs++], i, BTN_DPAD_DOWN, state.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_DOWN ? 1 : 0);
+                    }
+                    if (changes & XINPUT_GAMEPAD_DPAD_LEFT) {
+                        fillEv(&ev[noEvs++], i, BTN_DPAD_LEFT, state.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT ? 1 : 0);
+                    }
+                    if (changes & XINPUT_GAMEPAD_DPAD_RIGHT) {
+                        fillEv(&ev[noEvs++], i, BTN_DPAD_RIGHT, state.Gamepad.wButtons& XINPUT_GAMEPAD_DPAD_RIGHT ? 1 : 0);
+                    }
+                    if (changes & XINPUT_GAMEPAD_START) {
+                        fillEv(&ev[noEvs++], i, BTN_START, state.Gamepad.wButtons& XINPUT_GAMEPAD_START ? 1 : 0);
+                    }
+                    if (changes & XINPUT_GAMEPAD_BACK) {
+                        fillEv(&ev[noEvs++], i, BTN_SELECT, state.Gamepad.wButtons& XINPUT_GAMEPAD_BACK ? 1 : 0);
+                    }
+                    if (changes & XINPUT_GAMEPAD_LEFT_THUMB) {
+                        fillEv(&ev[noEvs++], i, BTN_THUMBL, state.Gamepad.wButtons& XINPUT_GAMEPAD_LEFT_THUMB ? 1 : 0);
+                    }
+                    if (changes & XINPUT_GAMEPAD_RIGHT_THUMB) {
+                        fillEv(&ev[noEvs++], i, BTN_THUMBR, state.Gamepad.wButtons & XINPUT_GAMEPAD_RIGHT_THUMB ? 1 : 0);
+                    }
+                    if (changes & XINPUT_GAMEPAD_LEFT_SHOULDER) {
+                        fillEv(&ev[noEvs++], i, BTN_TL, state.Gamepad.wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER ? 1 : 0);
+                    }
+                    if (changes & XINPUT_GAMEPAD_RIGHT_SHOULDER) {
+                        fillEv(&ev[noEvs++], i, BTN_TR, state.Gamepad.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER ? 1 : 0);
+                    }
+                    if (changes & XINPUT_GAMEPAD_A) {
+                        fillEv(&ev[noEvs++], i, BTN_A, state.Gamepad.wButtons & XINPUT_GAMEPAD_A ? 1 : 0);
+                    }
+                    if (changes & XINPUT_GAMEPAD_B) {
+                        fillEv(&ev[noEvs++], i, BTN_B, state.Gamepad.wButtons & XINPUT_GAMEPAD_B ? 1 : 0);
+                    }
+                    if (changes & XINPUT_GAMEPAD_X) {
+                        fillEv(&ev[noEvs++], i, BTN_X, state.Gamepad.wButtons & XINPUT_GAMEPAD_X ? 1 : 0);
+                    }
+                    if (changes & XINPUT_GAMEPAD_Y) {
+                        fillEv(&ev[noEvs++], i, BTN_Y, state.Gamepad.wButtons& XINPUT_GAMEPAD_Y ? 1 : 0);
+                    }
+                }
+            }
+            else
+            {
+                // Controller is not connected 
+            }
+        }
+        if (noEvs) {
+            int sent;
+            // todo only send noEvs
+            if ((sent = send(sock, (char*)&ev, sizeof ev, 0)) != sizeof ev) {
+                /*                        ShowError(NULL, L"send() hat eine andere Anzahl von Bytes versendet als erwartet !!!!", sent);
+                                        goto done;*/
+                DbgPrint(L"send() sent %i bytes instead of %i!\n", sent, sizeof ev);
+            }
+        }
+        else
+        {
+            Sleep(1);
+        }
+
+
+
+
     }
 
 done:
@@ -641,7 +911,6 @@ done:
         }
     }
 
-
     LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
     {
         switch (uMsg)
@@ -652,6 +921,9 @@ done:
         HANDLE_MSG(hwnd, WM_DESTROY, OnDestroy);
         HANDLE_MSG(hwnd, WM_COMMAND, OnCommand);
 
+        //case WM_QUIT:
+        case WM_CLOSE:
+            keepRunning = false;
         case WM_ERASEBKGND:
             return 1;
 
@@ -751,7 +1023,7 @@ HWND CreateMainWindow(HINSTANCE hInstance)
     RegisterClass(&wc);
 
     // Create the window.
-    return CreateWindowEx(0, CLASS_NAME, L"Capture Application",
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+    return CreateWindowEx(0, CLASS_NAME, L"Retro Play Together",
+        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1280+28, 720+157,
         NULL, NULL, hInstance, NULL);
 };
