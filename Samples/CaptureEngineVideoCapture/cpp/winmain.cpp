@@ -163,7 +163,7 @@ INT WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE /*hPrevInstance
     {
         /*DbgPrint(__wargv[1]);
         strcpy(hostname, __argv[1]);*/
-        sprintf(hostname, "%ws", __argv[1]);
+        sprintf(hostname, "%ws", __wargv[1]);
     }
     else {
         strcpy(hostname, "MiSTer.");
